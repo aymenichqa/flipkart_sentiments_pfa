@@ -207,3 +207,6 @@ marimo/_lsp/
 __marimo__/
 
 data/flipkart_data.csv
+# Ignorer les fichiers de données générés
+*.pkl
+*.csv
