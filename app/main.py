@@ -1,28 +1,70 @@
-# app/main.py — API FastAPI complète
-# Lancer avec : uvicorn app.main:app --reload --port 8000
+# app/main.py — API FastAPI v2.1
+# Lancer depuis la RACINE du projet :  uvicorn app.main:app --reload --port 8000
+#
+# Corrections v2.1 :
+#   - @on_event deprecated → contextmanager lifespan
+#   - imports app.scraper en haut du fichier (plus d'import circulaire)
+#   - /health sécurisé (ne crashe plus si modèles non chargés)
+#   - /stats endpoint (monitoring des prédictions)
+#   - /predict retourne 503 proprement si modèles non chargés
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-import joblib, sys, os, time, requests
-from bs4 import BeautifulSoup
 from datetime import datetime
+import joblib, sys, os
 
 # ── Chemins ──────────────────────────────────────────────────────────────────
 BASE_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_PATH)
-from src.preprocessing import clean_text
 
-# ── App FastAPI ───────────────────────────────────────────────────────────────
+from src.preprocessing import clean_text
+from app.scraper import scrape_trustpilot, scrape_amazon   # import en haut — plus de circulaire
+
+# ── État global des modèles ───────────────────────────────────────────────────
+vectorizer = None
+modele     = None
+
+# ── Compteurs de monitoring ───────────────────────────────────────────────────
+_stats = {
+    "predict_calls"      : 0,
+    "predict_batch_calls": 0,
+    "scrape_calls"       : 0,
+    "started_at"         : None,
+}
+
+# ── Lifespan (remplace @on_event deprecated) ─────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Chargement des modèles au démarrage, nettoyage à l'arrêt."""
+    global vectorizer, modele
+    models_path = os.path.join(BASE_PATH, 'models')
+    try:
+        vectorizer = joblib.load(os.path.join(models_path, 'tfidf_vectorizer.pkl'))
+        modele     = joblib.load(os.path.join(models_path, 'best_model_champion.pkl'))
+        _stats["started_at"] = datetime.now().isoformat()
+        print(f"✅ Modèle    : {type(modele).__name__}")
+        print(f"✅ Vectorizer: {vectorizer.get_params().get('max_features')} features TF-IDF")
+    except Exception as e:
+        print(f"❌ Erreur chargement modèles : {e}")
+        print(f"   Chemin models/ attendu : {models_path}")
+    yield
+    # Teardown (optionnel — libérer mémoire)
+    vectorizer = None
+    modele     = None
+
+# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Flipkart Sentiment Analysis API",
-    description="""
-    API de classification de sentiment pour reviews e-commerce.
-    Supporte : Trustpilot, Amazon.in, textes libres.
-    Modèles : Logistic Regression, Naive Bayes, LinearSVC.
-    """,
-    version="2.0.0"
+    description=(
+        "Classification de sentiment pour reviews e-commerce.\n"
+        "Classes : POSITIF / NEUTRE / NEGATIF\n"
+        "Sources supportées : texte libre, Trustpilot, Amazon.in"
+    ),
+    version="2.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -32,20 +74,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Chargement des modèles (une seule fois au démarrage) ─────────────────────
-vectorizer = None
-modele     = None
-
-@app.on_event("startup")
-def load_models():
-    global vectorizer, modele
-    models_path = os.path.join(BASE_PATH, 'models')
-    vectorizer = joblib.load(os.path.join(models_path, 'tfidf_vectorizer.pkl'))
-    modele     = joblib.load(os.path.join(models_path, 'best_model_champion.pkl'))
-    print(f"✅ Modèle chargé : {type(modele).__name__}")
-    print(f"✅ Vectorizer    : {vectorizer.get_params()['max_features']} features TF-IDF")
-
-# ── Schémas de données ────────────────────────────────────────────────────────
+# ── Schémas Pydantic ──────────────────────────────────────────────────────────
 class TextRequest(BaseModel):
     text: str
 
@@ -53,26 +82,26 @@ class BatchRequest(BaseModel):
     texts: List[str]
 
 class ScrapeRequest(BaseModel):
-    source: str          # "trustpilot" ou "amazon"
-    target: str          # nom de l'entreprise ou ASIN
-    max_pages: int = 3   # limiter pour la démo
+    source: str            # "trustpilot" | "amazon"
+    target: str            # nom entreprise ou ASIN
+    max_pages: int = 3
 
-class ReviewResult(BaseModel):
-    text_original: str
-    sentiment: str
-    confidence: float
-    proba_positif: float
-    proba_neutre: float
-    proba_negatif: float
+# ── Fonction centrale de prédiction ──────────────────────────────────────────
+def _check_models():
+    """Lève 503 proprement si les modèles ne sont pas chargés."""
+    if vectorizer is None or modele is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Modèles non chargés. Vérifier que models/ contient les .pkl."
+        )
 
-# ── Fonction de prédiction centrale ──────────────────────────────────────────
 def predict_one(text: str) -> dict:
     """Pipeline complet : texte brut → sentiment + probabilités."""
-    cleaned  = clean_text(text)
-    X        = vectorizer.transform([cleaned])
-    label    = modele.predict(X)[0]
-    probas   = modele.predict_proba(X)[0]
-    classes  = list(modele.classes_)
+    cleaned    = clean_text(text)
+    X          = vectorizer.transform([cleaned])
+    label      = modele.predict(X)[0]
+    probas     = modele.predict_proba(X)[0]
+    classes    = list(modele.classes_)
     proba_dict = {c: round(float(p), 4) for c, p in zip(classes, probas)}
     return {
         "sentiment"    : label,
@@ -83,86 +112,97 @@ def predict_one(text: str) -> dict:
         "proba_NEGATIF": proba_dict.get("NEGATIF", 0),
     }
 
-# ── Scrapers intégrés ─────────────────────────────────────────────────────────
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                  'AppleWebKit/537.36 (KHTML, like Gecko) '
-                  'Chrome/120.0.0.0 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
-}
-
-def scrape_trustpilot(company: str, max_pages: int = 3) -> List[dict]:
-    """Scrape les reviews Trustpilot d'une entreprise."""
-    from app.scraper import scrape_trustpilot
-    return scrape_trustpilot(company, max_pages)
-
-
-def scrape_amazon(asin: str, max_pages: int = 2) -> List[dict]:
-    """Scrape les reviews Amazon.in d'un produit par ASIN."""
-    from app.scraper import scrape_amazon
-    return scrape_amazon(asin, max_pages)
-
 # ── ENDPOINTS ─────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
     return {
-        "message" : "Flipkart Sentiment Analysis API v2.0",
-        "endpoints": ["/health", "/predict", "/predict/batch", "/scrape", "/docs"]
+        "name"     : "Flipkart Sentiment Analysis API",
+        "version"  : "2.1.0",
+        "status"   : "running" if modele is not None else "models_not_loaded",
+        "endpoints": ["/health", "/predict", "/predict/batch", "/scrape", "/stats", "/docs"],
     }
 
 @app.get("/health")
 def health():
+    """Statut de l'API — ne crashe jamais même si modèles non chargés."""
+    if modele is None or vectorizer is None:
+        return {
+            "status" : "degraded",
+            "reason" : "Modèles non chargés",
+            "tip"    : "Lancer depuis la RACINE : uvicorn app.main:app --reload"
+        }
     return {
-        "status"     : "ok",
-        "model"      : type(modele).__name__,
-        "tfidf_features": vectorizer.get_params()['max_features'],
-        "timestamp"  : datetime.now().isoformat()
+        "status"        : "ok",
+        "model"         : type(modele).__name__,
+        "tfidf_features": vectorizer.get_params().get("max_features"),
+        "started_at"    : _stats["started_at"],
+        "timestamp"     : datetime.now().isoformat(),
     }
 
-# --- Prédiction texte unique ---
+@app.get("/stats")
+def stats():
+    """Compteurs de monitoring — nombre de prédictions depuis le démarrage."""
+    total = _stats["predict_calls"] + _stats["predict_batch_calls"] + _stats["scrape_calls"]
+    return {
+        **_stats,
+        "total_predictions": total,
+    }
+
 @app.post("/predict")
 def predict(req: TextRequest):
+    """Prédit le sentiment d'un texte unique."""
+    _check_models()
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Le texte ne peut pas être vide")
+    _stats["predict_calls"] += 1
     result = predict_one(req.text)
     result["text_original"] = req.text[:200]
     return result
 
-# --- Prédiction batch ---
 @app.post("/predict/batch")
 def predict_batch(req: BatchRequest):
+    """Prédit le sentiment de jusqu'à 200 textes en une seule requête."""
+    _check_models()
+    if not req.texts:
+        raise HTTPException(status_code=400, detail="La liste de textes est vide")
     if len(req.texts) > 200:
         raise HTTPException(status_code=400, detail="Maximum 200 textes par batch")
+
+    _stats["predict_batch_calls"] += 1
     results = []
     for text in req.texts:
         pred = predict_one(text)
         pred["text_original"] = text[:100]
         results.append(pred)
 
-    # Statistiques globales
     sentiments = [r["sentiment"] for r in results]
-    stats = {
-        "total"   : len(results),
-        "POSITIF" : sentiments.count("POSITIF"),
-        "NEUTRE"  : sentiments.count("NEUTRE"),
-        "NEGATIF" : sentiments.count("NEGATIF"),
-        "confidence_moyenne": round(sum(r["confidence"] for r in results) / len(results), 4)
+    n = len(results)
+    stats_batch = {
+        "total"              : n,
+        "POSITIF"            : sentiments.count("POSITIF"),
+        "NEUTRE"             : sentiments.count("NEUTRE"),
+        "NEGATIF"            : sentiments.count("NEGATIF"),
+        "pct_positif"        : round(sentiments.count("POSITIF") / n * 100, 1),
+        "pct_negatif"        : round(sentiments.count("NEGATIF") / n * 100, 1),
+        "confidence_moyenne" : round(sum(r["confidence"] for r in results) / n, 4),
     }
-    return {"results": results, "statistics": stats}
+    return {"statistics": stats_batch, "results": results}
 
-# --- Endpoint principal : scraper + analyser ---
 @app.post("/scrape")
 def scrape_and_analyze(req: ScrapeRequest):
     """
     Scrape les reviews d'un site et retourne l'analyse de sentiment.
-    source = "trustpilot" | "amazon"
-    target = nom d'entreprise (trustpilot) ou ASIN (amazon)
+    - source = "trustpilot" : target = nom d'entreprise (ex: "amazon.in")
+    - source = "amazon"     : target = ASIN (ex: "B0CX8GR1GR")
     """
-    # 1. Scraper
-    if req.source == "trustpilot":
+    _check_models()
+    _stats["scrape_calls"] += 1
+
+    source_clean = req.source.lower().strip()
+    if source_clean == "trustpilot":
         raw_reviews = scrape_trustpilot(req.target, max_pages=req.max_pages)
-    elif req.source == "amazon":
+    elif source_clean == "amazon":
         raw_reviews = scrape_amazon(req.target, max_pages=req.max_pages)
     else:
         raise HTTPException(status_code=400,
@@ -170,26 +210,16 @@ def scrape_and_analyze(req: ScrapeRequest):
 
     if not raw_reviews:
         raise HTTPException(status_code=404,
-                            detail=f"Aucune review trouvée pour '{req.target}'. "
-                                   "Vérifier le nom d'entreprise ou l'ASIN.")
+                            detail=f"Aucune review trouvée pour '{req.target}'")
 
-    # 2. Analyser chaque review
     analyzed = []
     for review in raw_reviews:
         pred = predict_one(review["text"])
-        analyzed.append({
-            **review,
-            "sentiment"    : pred["sentiment"],
-            "confidence"   : pred["confidence"],
-            "proba_POSITIF": pred["proba_POSITIF"],
-            "proba_NEUTRE" : pred["proba_NEUTRE"],
-            "proba_NEGATIF": pred["proba_NEGATIF"],
-        })
+        analyzed.append({**review, **pred})
 
-    # 3. Statistiques globales
     sentiments = [r["sentiment"] for r in analyzed]
     n = len(analyzed)
-    stats = {
+    result_stats = {
         "total"              : n,
         "source"             : req.source,
         "target"             : req.target,
@@ -199,8 +229,7 @@ def scrape_and_analyze(req: ScrapeRequest):
         "pct_positif"        : round(sentiments.count("POSITIF") / n * 100, 1),
         "pct_negatif"        : round(sentiments.count("NEGATIF") / n * 100, 1),
         "confidence_moyenne" : round(sum(r["confidence"] for r in analyzed) / n, 4),
-        "alerte"             : sentiments.count("NEGATIF") / n > 0.3,
+        "alerte"             : sentiments.count("NEGATIF") / n > 0.30,
         "timestamp"          : datetime.now().isoformat(),
     }
-
-    return {"statistics": stats, "reviews": analyzed}
+    return {"statistics": result_stats, "reviews": analyzed}

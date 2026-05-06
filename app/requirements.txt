@@ -1,0 +1,23 @@
+# app/requirements.txt — dépendances pour déploiement de l'API seule
+# Installer avec : pip install -r app/requirements.txt
+# Puis : playwright install chromium
+
+fastapi==0.136.1
+uvicorn[standard]==0.34.3
+pydantic==2.11.4
+
+# ML
+joblib==1.5.3
+scikit-learn==1.6.1
+nltk==3.9.1
+
+# Scraping
+beautifulsoup4==4.14.3
+lxml==6.1.0
+requests==2.32.3
+playwright==1.52.0
+
+# Dashboard (optionnel, séparable)
+streamlit==1.45.1
+plotly==6.1.1
+pandas==2.2.3
