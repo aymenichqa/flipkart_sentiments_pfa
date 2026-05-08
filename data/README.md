@@ -1,34 +1,90 @@
-data/ — Documentation du dataset
-Source
-Flipkart Product Reviews — dataset public de reviews e-commerce provenant
-de la plateforme Flipkart (Inde). Disponible sur Kaggle :
-https://www.kaggle.com/datasets/niraliivaghani/flipkart-product-customer-reviews-dataset
-Format
-FichierDescriptionflipkart_data_with_sentiment.csvDataset brut avec labels de sentiment assignésflipkart_data_preprocessed.csvDataset après preprocessing NLP (tokenisation, stopwords, lemmatisation)y_train.csvLabels d'entraînement (colonne sentiment)y_test.csvLabels de test (colonne sentiment)X_train.pklVecteurs TF-IDF d'entraînement (scipy sparse matrix)X_test.pklVecteurs TF-IDF de test (scipy sparse matrix)
-Statistiques
-MétriqueValeurTotal reviews9 976Train / Test7 980 / 1 996 (80% / 20%)Splittrain_test_split(random_state=42, stratify=y)
-Distribution des classes
-ClasseEffectif%Règle d'assignationPOSITIF8 09181.1%rating ≥ 4 étoilesNÉGATIF1 00110.0%rating ≤ 2 étoilesNEUTRE8848.9%rating = 3 étoiles
+# Documentation du Dataset Flipkart
 
-⚠️ Dataset déséquilibré — POSITIF représente 81% des données.
-C'est la principale raison du faible F1-NEUTRE (~0.29 pour LR) : le modèle
-n'a pas assez d'exemples NEUTRE et NÉGATIF pour bien les apprendre.
-Pistes d'amélioration : SMOTE, class_weight="balanced", sous-échantillonnage POSITIF.
+## Source
+**Flipkart Product Reviews** — Dataset public de reviews e-commerce provenant de la plateforme **Flipkart (Inde)**.
+Disponible sur Kaggle : [Flipkart Product Customer Reviews Dataset](https://www.kaggle.com/datasets/niraliivaghani/flipkart-product-customer-reviews-dataset)
 
-Colonnes du dataset brut
-ColonneTypeDescriptionreviewstrTexte de la review en anglaisratingfloatNote de 1 à 5 étoilessentimentstrLabel : Positif / Neutre / Négatifreview_lengthintNombre de caractèreslangstrLangue détectée (langdetect)word_countintNombre de mots
-Preprocessing appliqué (src/preprocessing.py)
+## Structure des fichiers
 
-lower() — mise en minuscules
-re.sub(r'[^a-z\s]', '', text) — suppression ponctuation et chiffres
-word_tokenize — tokenisation NLTK
-Suppression des stopwords anglais (NLTK)
-WordNetLemmatizer — lemmatisation
-TfidfVectorizer(max_features=10000, ngram_range=(1,2)) — vectorisation
+| Fichier | Description |
+|---------|-------------|
+| `flipkart_data_with_sentiment.csv` | Dataset brut avec labels de sentiment assignés |
+| `flipkart_data_preprocessed.csv` | Dataset après preprocessing NLP (tokenisation, stopwords, lemmatisation) |
+| `y_train.csv` | Labels d'entraînement (colonne sentiment) |
+| `y_test.csv` | Labels de test (colonne sentiment) |
+| `X_train.pkl` | Vecteurs TF-IDF d'entraînement (scipy sparse matrix) |
+| `X_test.pkl` | Vecteurs TF-IDF de test (scipy sparse matrix) |
+| `history.db` | Base SQLite — historique des analyses utilisateur |
 
-Reproductibilité
-pythonfrom sklearn.model_selection import train_test_split
+## Statistiques du Dataset
+
+| Métrique | Valeur |
+|----------|--------|
+| Total reviews | **9 976** |
+| Train / Test | **7 980 / 1 996** (80% / 20%) |
+| Split | `train_test_split(random_state=42, stratify=y)` |
+
+## Distribution des classes
+
+| Classe | Effectif | % | Règle d'assignation |
+|--------|----------|---|---------------------|
+| **POSITIF** | 8 091 | **81.1%** | rating ≥ 4 étoiles |
+| **NÉGATIF** | 1 001 | **10.0%** | rating ≤ 2 étoiles |
+| **NEUTRE** | 884 | **8.9%** | rating = 3 étoiles |
+
+> ⚠️ **Dataset déséquilibré** — POSITIF représente 81% des données.
+> C'est la principale raison du faible F1-NEUTRE (~0.29 pour LR) : le modèle n'a pas assez d'exemples NEUTRE et NÉGATIF pour bien les apprendre.
+>
+> **Pistes d'amélioration** : SMOTE, `class_weight="balanced"`, sous-échantillonnage POSITIF, ou augmentation de données.
+
+## Colonnes du dataset brut
+
+| Colonne | Type | Description |
+|---------|------|-------------|
+| `review` | str | Texte de la review (anglais principalement) |
+| `rating` | float | Note de 1 à 5 étoiles |
+| `sentiment` | str | Label : Positif / Neutre / Négatif |
+| `review_length` | int | Nombre de caractères |
+| `lang` | str | Langue détectée (langdetect) |
+| `word_count` | int | Nombre de mots |
+
+## Preprocessing appliqué
+
+Pipeline défini dans `src/preprocessing.py` :
+
+1. **`lower()`** — mise en minuscules
+2. **`re.sub(r'[^a-z\s]', '', text)`** — suppression ponctuation et chiffres
+3. **`word_tokenize`** — tokenisation NLTK
+4. **Suppression des stopwords anglais** (NLTK)
+5. **`WordNetLemmatizer`** — lemmatisation
+6. **`TfidfVectorizer(max_features=10000, ngram_range=(1,2))`** — vectorisation
+
+## Reproductibilité
+
+```python
+from sklearn.model_selection import train_test_split
+
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
-Le random_state=42 garantit des splits identiques à chaque exécution.
+```
+
+Le `random_state=42` garantit des splits identiques à chaque exécution.
+
+## Schéma de la base SQLite (`history.db`)
+
+```sql
+CREATE TABLE logs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    date          TEXT NOT NULL,
+    texte_ou_url  TEXT NOT NULL,
+    modele_utilise TEXT NOT NULL,
+    v2_model_key  TEXT,
+    sentiment     TEXT,
+    confiance     REAL,
+    source        TEXT,
+    type_analyse  TEXT NOT NULL
+);
+```
+
+Cette table stocke l'historique de toutes les analyses (prédictions individuelles et scrapings) effectuées via le dashboard.
